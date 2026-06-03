@@ -321,11 +321,11 @@ function P1_Inventory({state,setState,onBack,onNext}){
         // Auto-detect column mapping by fuzzy matching header names
         const autoMap={};
         const fields=[
-          {key:"name",      keywords:["item","name","product","ingredient","material","description"]},
-          {key:"vendorName",keywords:["vendor","supplier","source","company","store","distributor"]},
-          {key:"vendorUrl", keywords:["url","link","website","href","order","site"]},
-          {key:"buyUnit",   keywords:["unit","uom","measure"]},
-          {key:"buyPrice",  keywords:["price","cost","rate","total","amount","$"]},
+          {key:"name",      keywords:["item name","item","name","product","ingredient","material","description"]},
+          {key:"buyPrice",  keywords:["price","cost","rate","amount","$"]},
+          {key:"buyUnit",   keywords:["sku","unit","uom","measure"]},
+          {key:"vendorUrl", keywords:["link","url","website","href","order link","site"]},
+          {key:"vendorName",keywords:["vendor name","vendor","supplier","source","company","store","distributor"]},
         ];
         parsed.headers.forEach((h,i)=>{
           const hl=h.toLowerCase();
@@ -350,7 +350,7 @@ function P1_Inventory({state,setState,onBack,onNext}){
     const newItems=rows.map(row=>{
       const item=newInvItem();
       const n=getCol("name");      if(n!==null) item.name=row[n]||"";
-      const vn=getCol("vendorName");if(vn!==null) item.vendorName=row[vn]||"";
+      const vn=getCol("vendorName");if(vn!==null) item.vendorName=(row[vn]||"").replace(/:\s*$/,"").trim();
       const vu=getCol("vendorUrl"); if(vu!==null) item.vendorUrl=row[vu]||"";
       const bu=getCol("buyUnit");   if(bu!==null){
         const raw=(row[bu]||"").toLowerCase().trim();
@@ -358,12 +358,12 @@ function P1_Inventory({state,setState,onBack,onNext}){
         item.buyUnit=match?match.v:"";
       }
       const bp=getCol("buyPrice");  if(bp!==null){
-        const raw=(row[bp]||"").replace(/[$,\s]/g,"").trim();
+        const raw=(row[bp]||"").replace(/[$,]/g,"").trim();
         item.buyPrice=raw;
       }
       item.buyQty="1"; // default to 1 unit since we're not importing qty
       return item;
-    }).filter(i=>i.name.trim());
+    }).filter(i=>i.name.trim()&&i.name.trim()!=="Item Name");
 
     if(!newItems.length){setImportMsg("⚠ No valid rows found. Make sure your Item Name column is mapped correctly.");return;}
 
