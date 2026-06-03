@@ -68,7 +68,7 @@ const INDUSTRIES = {
 };
 
 // ── Data constructors ─────────────────────────────────────────────────────────
-const newInvItem   = () => ({id:uid(),name:"",category:"ingredients",buyQty:"",buyUnit:"",buyPrice:""});
+const newInvItem   = () => ({id:uid(),name:"",category:"ingredients",buyQty:"",buyUnit:"",buyPrice:"",vendorName:"",vendorUrl:"",monthlyQtyOrdered:{},monthlyCountOnHand:{},priceHistory:[]});
 const newIngRow    = () => ({id:uid(),inventoryId:"",useQty:"",useUnit:""});
 const newUniversal = () => ({id:uid(),inventoryId:"",useQty:"1",useUnit:"each"});
 const newSize      = (name,oz) => ({id:uid(),name,oz:String(oz),on:true});
@@ -85,7 +85,7 @@ const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const DEFAULT = {
   // meta
   step:0, phase:1,
-  businessName:"", industry:"",
+  businessName:"", industry:"", ownerEmail:"",
   // p1
   useSizes:true,
   sizes:[newSize("Small",8),newSize("Medium",12),newSize("Large",16)],
@@ -188,8 +188,8 @@ function PhaseNav({phase,setPhase,step}){
 }
 
 // ── P1 Step bar ───────────────────────────────────────────────────────────────
-const P1_STEPS=["Business Info","Product Sizes","Inventory","Recipes","Menu & Margins"];
-const P1_STEPS_SKIP=["Business Info","Inventory","Recipes","Menu & Margins"];
+const P1_STEPS=["Business Info","Product Sizes","Inventory","Recipes","Menu & Margins","Inventory Tracker"];
+const P1_STEPS_SKIP=["Business Info","Inventory","Recipes","Menu & Margins","Inventory Tracker"];
 function StepBar({current,skipSizes}){
   const steps=skipSizes?P1_STEPS_SKIP:P1_STEPS;
   const di=skipSizes?(current===0?0:current===1?0:current-1):current;
@@ -286,28 +286,215 @@ function P1_Inventory({state,setState,onBack,onNext}){
   const {inventory}=state;
   const upd=(id,f,v)=>setState(p=>({...p,inventory:p.inventory.map(i=>i.id===id?{...i,[f]:v}:i)}));
   const canNext=inventory.some(i=>i.name.trim()&&toNum(i.buyQty)>0&&toNum(i.buyPrice)>0);
+  const fileRef=useRef(null);
+  const [importState,setImportState]=useState(null); // null | {rows, headers, mapping, preview}
+  const [importMsg,setImportMsg]=useState("");
+
+  // ── Spreadsheet import ──
+  function parseCSV(text){
+    const lines=text.split(/\r?\n/).filter(l=>l.trim());
+    if(lines.length<2) return null;
+    // Detect delimiter: comma or tab
+    const delim=lines[0].includes("\t")?"\t":",";
+    function splitRow(row){
+      // Handle quoted fields
+      const cells=[];let cur="",inQ=false;
+      for(let i=0;i<row.length;i++){const c=row[i];if(c==='"'){inQ=!inQ;}else if(c===delim&&!inQ){cells.push(cur.trim());cur="";}else cur+=c;}
+      cells.push(cur.trim());return cells;
+    }
+    const headers=splitRow(lines[0]);
+    const rows=lines.slice(1).map(l=>splitRow(l)).filter(r=>r.some(c=>c));
+    return {headers,rows};
+  }
+
+  function handleFile(e){
+    const file=e.target.files[0];
+    if(!file){return;}
+    e.target.value="";
+    const ext=file.name.split(".").pop().toLowerCase();
+
+    if(ext==="csv"||ext==="tsv"||ext==="txt"){
+      const reader=new FileReader();
+      reader.onload=ev=>{
+        const parsed=parseCSV(ev.target.result);
+        if(!parsed||!parsed.headers.length){setImportMsg("⚠ Could not read file. Make sure it's a CSV with headers.");return;}
+        // Auto-detect column mapping by fuzzy matching header names
+        const autoMap={};
+        const fields=[
+          {key:"name",      keywords:["item","name","product","ingredient","material","description"]},
+          {key:"vendorName",keywords:["vendor","supplier","source","company","store","distributor"]},
+          {key:"vendorUrl", keywords:["url","link","website","href","order","site"]},
+          {key:"buyUnit",   keywords:["unit","uom","measure"]},
+          {key:"buyPrice",  keywords:["price","cost","rate","total","amount","$"]},
+        ];
+        parsed.headers.forEach((h,i)=>{
+          const hl=h.toLowerCase();
+          for(const f of fields){
+            if(!autoMap[f.key]&&f.keywords.some(k=>hl.includes(k))){
+              autoMap[f.key]=String(i);break;
+            }
+          }
+        });
+        setImportState({rows:parsed.rows,headers:parsed.headers,mapping:autoMap,preview:parsed.rows.slice(0,3)});
+      };
+      reader.readAsText(file);
+    } else {
+      setImportMsg("⚠ Please upload a CSV file. To use Excel: File → Save As → CSV (.csv)");
+    }
+  }
+
+  function applyImport(){
+    if(!importState) return;
+    const {rows,headers,mapping}=importState;
+    const getCol=(key)=>mapping[key]!==undefined&&mapping[key]!==""?parseInt(mapping[key]):null;
+    const newItems=rows.map(row=>{
+      const item=newInvItem();
+      const n=getCol("name");      if(n!==null) item.name=row[n]||"";
+      const vn=getCol("vendorName");if(vn!==null) item.vendorName=row[vn]||"";
+      const vu=getCol("vendorUrl"); if(vu!==null) item.vendorUrl=row[vu]||"";
+      const bu=getCol("buyUnit");   if(bu!==null){
+        const raw=(row[bu]||"").toLowerCase().trim();
+        const match=UNIT_GROUPS.flatMap(g=>g.units).find(u=>u.l.toLowerCase()===raw||u.v===raw||u.l.toLowerCase().includes(raw));
+        item.buyUnit=match?match.v:"";
+      }
+      const bp=getCol("buyPrice");  if(bp!==null){
+        const raw=(row[bp]||"").replace(/[$,\s]/g,"").trim();
+        item.buyPrice=raw;
+      }
+      item.buyQty="1"; // default to 1 unit since we're not importing qty
+      return item;
+    }).filter(i=>i.name.trim());
+
+    if(!newItems.length){setImportMsg("⚠ No valid rows found. Make sure your Item Name column is mapped correctly.");return;}
+
+    // Keep existing non-empty items and append imported ones
+    const existing=inventory.filter(i=>i.name.trim());
+    setState(p=>({...p,inventory:[...(existing.length?existing:[]),...newItems]}));
+    setImportState(null);
+    setImportMsg(`✓ Imported ${newItems.length} items successfully`);
+    setTimeout(()=>setImportMsg(""),4000);
+  }
+
+  // Group by vendor for display
+  const vendors=[...new Set(inventory.map(i=>i.vendorName?.trim()||"__none__"))];
+
   return <div className="fu">
     <h2 style={{fontSize:22,fontWeight:700,letterSpacing:"-.02em",marginBottom:6}}>Inventory — What do you buy?</h2>
-    <p style={{color:"var(--ink2)",fontSize:14,lineHeight:1.6,marginBottom:16}}>List everything you purchase. This becomes your cost library for recipes.</p>
-    <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 80px 1fr 100px 28px",gap:8,padding:"0 4px",marginBottom:8}}>
-      {["Item Name","Category","Buy Qty","Buy Unit","Price Paid",""].map((h,i)=><div key={i} style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em"}}>{h}</div>)}
+    <p style={{color:"var(--ink2)",fontSize:14,lineHeight:1.6,marginBottom:12}}>List everything you purchase. You can type items manually or import directly from a spreadsheet.</p>
+
+    {/* Import banner */}
+    <div style={{background:"var(--blue-bg)",border:"1px solid var(--blue-line)",borderRadius:"var(--rL)",padding:"14px 18px",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+      <div>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--blue)",marginBottom:2}}>📂 Import from spreadsheet</div>
+        <div style={{fontSize:12,color:"var(--ink2)"}}>Upload a CSV file with your vendor, item name, and price already filled in. Excel users: <strong>File → Save As → CSV</strong> first.</div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        {importMsg&&<span style={{fontSize:12,color:importMsg.startsWith("✓")?"var(--green)":"var(--red)",fontWeight:600}}>{importMsg}</span>}
+        <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" onChange={handleFile} style={{display:"none"}}/>
+        <button onClick={()=>{
+          const csv="Item Name,Vendor Name,Order Link,Unit,Price\nWhole Milk,Kroger,https://kroger.com,gallon,3.29\nVanilla Syrup,Sysco,,gallon,12.99\n12oz Cup,Amazon,https://amazon.com,each,0.05";
+          const blob=new Blob([csv],{type:"text/csv"});
+          const url=URL.createObjectURL(blob);
+          const a=document.createElement("a");a.href=url;a.download="inventory-template.csv";a.click();URL.revokeObjectURL(url);
+        }} style={{padding:"7px 16px",borderRadius:"var(--r)",border:"1px solid var(--line2)",background:"var(--bg2)",color:"var(--ink2)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>⬇ Download template</button>
+        <button onClick={()=>fileRef.current.click()} style={{padding:"7px 16px",borderRadius:"var(--r)",border:"1px solid var(--blue-line)",background:"#fff",color:"var(--blue)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Choose file</button>
+      </div>
     </div>
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
-      {inventory.map(item=>{
+
+    {/* Column mapping modal */}
+    {importState&&<div style={{background:"#fff",border:"1px solid var(--gold-line)",borderRadius:"var(--rL)",padding:"20px",marginBottom:16,boxShadow:"var(--sh)"}}>
+      <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>Map your columns</div>
+      <div style={{fontSize:13,color:"var(--ink2)",marginBottom:14}}>We auto-detected the mapping below. Adjust any that look wrong, then click Import.</div>
+
+      {/* Preview */}
+      <div style={{marginBottom:14,overflowX:"auto"}}>
+        <div style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>File preview (first 3 rows)</div>
+        <table style={{fontSize:12,minWidth:400}}>
+          <thead><tr style={{background:"var(--bg2)"}}>{importState.headers.map((h,i)=><th key={i} style={{padding:"5px 10px",textAlign:"left",whiteSpace:"nowrap",border:"1px solid var(--line)"}}>{h}</th>)}</tr></thead>
+          <tbody>{importState.preview.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j} style={{padding:"4px 10px",border:"1px solid var(--line)",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{cell}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+
+      {/* Mapping selectors */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10,marginBottom:16}}>
+        {[
+          {key:"name",      label:"Item Name",    required:true},
+          {key:"vendorName",label:"Vendor Name",   required:false},
+          {key:"vendorUrl", label:"Order Link/URL",required:false},
+          {key:"buyUnit",   label:"Unit",          required:false},
+          {key:"buyPrice",  label:"Price",         required:false},
+        ].map(f=><div key={f.key}>
+          <div style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>{f.label}{f.required&&<span style={{color:"var(--red)"}}> *</span>}</div>
+          <select value={importState.mapping[f.key]||""} onChange={e=>setImportState(p=>({...p,mapping:{...p.mapping,[f.key]:e.target.value}}))} style={{...selS,borderColor:f.required&&!importState.mapping[f.key]?"var(--red)":undefined}}>
+            <option value="">— not in my file —</option>
+            {importState.headers.map((h,i)=><option key={i} value={String(i)}>{h}</option>)}
+          </select>
+        </div>)}
+      </div>
+
+      <div style={{display:"flex",gap:10}}>
+        <button onClick={applyImport} disabled={!importState.mapping.name} style={{padding:"9px 20px",borderRadius:"var(--r)",background:importState.mapping.name?"var(--ink)":"var(--bg3)",color:importState.mapping.name?"#fff":"var(--ink3)",border:"none",fontSize:14,fontWeight:600,cursor:importState.mapping.name?"pointer":"not-allowed",fontFamily:"inherit"}}>
+          Import {importState.rows.length} rows
+        </button>
+        <button onClick={()=>setImportState(null)} style={{padding:"9px 20px",borderRadius:"var(--r)",background:"none",border:"1px solid var(--line2)",color:"var(--ink2)",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
+      </div>
+    </div>}
+
+    <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:12}}>
+      {inventory.map((item,idx)=>{
         const cpu=toNum(item.buyQty)>0&&toNum(item.buyPrice)>0?toNum(item.buyPrice)/toNum(item.buyQty):null;
-        return <div key={item.id} style={{background:"#fff",border:"1px solid var(--line)",borderRadius:"var(--r)",padding:"10px 12px",boxShadow:"var(--sh)"}}>
-          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 80px 1fr 100px 28px",gap:8,alignItems:"center"}}>
-            <input value={item.name} onChange={e=>upd(item.id,"name",e.target.value)} placeholder="e.g. Whole Milk, 12oz Cup" style={iS}/>
-            <select value={item.category} onChange={e=>upd(item.id,"category",e.target.value)} style={selS}>{INV_CATS.map(c=><option key={c.v} value={c.v}>{c.l}</option>)}</select>
-            <input type="number" min="0" step="0.01" placeholder="1" value={item.buyQty} onChange={e=>upd(item.id,"buyQty",e.target.value)} style={iS}/>
-            <select value={item.buyUnit} onChange={e=>upd(item.id,"buyUnit",e.target.value)} style={{...selS,borderColor:!item.buyUnit?"var(--gold)":undefined,color:!item.buyUnit?"var(--ink3)":undefined}}>
-              <option value="">— pick unit —</option>
-              {UNIT_GROUPS.map(g=><optgroup key={g.label} label={g.label}>{g.units.map(u=><option key={u.v} value={u.v}>{u.l}</option>)}</optgroup>)}
-            </select>
-            <div style={{position:"relative"}}><span style={{position:"absolute",left:9,top:"50%",transform:"translateY(-50%)",fontSize:12,color:"var(--ink3)"}}>$</span><input type="number" min="0" step="0.01" placeholder="0.00" value={item.buyPrice} onChange={e=>upd(item.id,"buyPrice",e.target.value)} style={{...iS,paddingLeft:20}}/></div>
-            <button onClick={()=>{if(inventory.length>1)setState(p=>({...p,inventory:p.inventory.filter(i=>i.id!==item.id)}))}} style={{background:"none",border:"none",color:"var(--ink3)",cursor:"pointer",fontSize:18,padding:0,lineHeight:1}}>×</button>
+        const isNewVendor=idx===0||inventory[idx-1].vendorName?.trim()!==item.vendorName?.trim();
+        return <div key={item.id}>
+          {isNewVendor&&item.vendorName?.trim()&&<div style={{fontSize:11,fontWeight:700,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.08em",padding:"8px 4px 4px",borderTop:idx>0?"1px solid var(--line)":undefined,marginTop:idx>0?8:0}}>
+            {item.vendorUrl?.trim()?<a href={item.vendorUrl} target="_blank" rel="noopener noreferrer" style={{color:"var(--blue)",textDecoration:"none"}}>🔗 {item.vendorName}</a>:item.vendorName}
+          </div>}
+          <div style={{background:"#fff",border:"1px solid var(--line)",borderRadius:"var(--r)",padding:"10px 12px",boxShadow:"var(--sh)"}}>
+            {/* Row 1: vendor */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 28px",gap:8,marginBottom:8,alignItems:"center"}}>
+              <input value={item.vendorName||""} onChange={e=>upd(item.id,"vendorName",e.target.value)} placeholder="Vendor / Supplier name (e.g. Sysco, Amazon)" style={{...iS,fontSize:13}}/>
+              <input value={item.vendorUrl||""} onChange={e=>upd(item.id,"vendorUrl",e.target.value)} placeholder="Order link / URL (optional)" style={{...iS,fontSize:13}}/>
+              <button onClick={()=>{if(inventory.length>1)setState(p=>({...p,inventory:p.inventory.filter(i=>i.id!==item.id)}))}} style={{background:"none",border:"none",color:"var(--ink3)",cursor:"pointer",fontSize:18,padding:0,lineHeight:1}}>×</button>
+            </div>
+            {/* Row 2: item details */}
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 80px 1fr 100px",gap:8,alignItems:"center"}}>
+              <input value={item.name} onChange={e=>upd(item.id,"name",e.target.value)} placeholder="Item name (e.g. Whole Milk, 12oz Cup)" style={iS}/>
+              <select value={item.category} onChange={e=>upd(item.id,"category",e.target.value)} style={selS}>{INV_CATS.map(c=><option key={c.v} value={c.v}>{c.l}</option>)}</select>
+              <input type="number" min="0" step="0.01" placeholder="1" value={item.buyQty} onChange={e=>upd(item.id,"buyQty",e.target.value)} style={iS}/>
+              <select value={item.buyUnit} onChange={e=>upd(item.id,"buyUnit",e.target.value)} style={{...selS,borderColor:!item.buyUnit?"var(--gold)":undefined,color:!item.buyUnit?"var(--ink3)":undefined}}>
+                <option value="">— pick unit —</option>
+                {UNIT_GROUPS.map(g=><optgroup key={g.label} label={g.label}>{g.units.map(u=><option key={u.v} value={u.v}>{u.l}</option>)}</optgroup>)}
+              </select>
+              <div style={{position:"relative"}}>
+              <span style={{position:"absolute",left:9,top:"50%",transform:"translateY(-50%)",fontSize:12,color:"var(--ink3)"}}>$</span>
+              <input type="number" min="0" step="0.01" placeholder="0.00" value={item.buyPrice}
+                onChange={e=>{
+                  const newPrice=e.target.value;
+                  const oldPrice=item.buyPrice;
+                  setState(p=>({...p,inventory:p.inventory.map(i=>{
+                    if(i.id!==item.id) return i;
+                    const history=i.priceHistory||[];
+                    const changed=oldPrice&&toNum(oldPrice)>0&&toNum(newPrice)>0&&toNum(newPrice)!==toNum(oldPrice);
+                    return {...i,buyPrice:newPrice,
+                      priceHistory:changed?[...history,{date:new Date().toLocaleDateString(),from:oldPrice,to:newPrice}]:history
+                    };
+                  })}));
+                }}
+                style={{...iS,paddingLeft:20,borderColor:item.priceHistory?.length>0?"var(--gold)":undefined}}/>
+            </div>
+            </div>
+            <div style={{marginTop:6,display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,fontSize:12,color:"var(--ink3)"}}>
+            {cpu!==null&&<span>Cost per {item.buyUnit||"unit"}: <strong style={{color:"var(--ink2)"}}>${cpu.toFixed(4)}</strong></span>}
+            {item.vendorUrl?.trim()&&<a href={item.vendorUrl} target="_blank" rel="noopener noreferrer" style={{color:"var(--blue)"}}>Order →</a>}
+            {item.priceHistory?.length>0&&<span style={{background:"var(--gold-bg)",color:"var(--gold)",border:"1px solid var(--gold-line)",borderRadius:99,padding:"1px 8px",cursor:"pointer"}} title={item.priceHistory.map(h=>`${h.date}: $${h.from} → $${h.to}`).join(" | ")}>
+              📈 {item.priceHistory.length} price change{item.priceHistory.length!==1?"s":""} — hover to see history
+            </span>}
+            {item.priceHistory?.length>0&&(()=>{
+              const last=item.priceHistory[item.priceHistory.length-1];
+              const pct=((toNum(last.to)-toNum(last.from))/toNum(last.from))*100;
+              return <span style={{color:pct>0?"var(--red)":"var(--green)",fontWeight:600}}>{pct>0?"▲":"▼"}{Math.abs(pct).toFixed(1)}% last change</span>;
+            })()}
           </div>
-          {cpu!==null&&<div style={{marginTop:5,fontSize:12,color:"var(--ink3)"}}>Cost per {item.buyUnit||"unit"}: <strong style={{color:"var(--ink2)"}}>${cpu.toFixed(4)}</strong></div>}
+          </div>
         </div>;
       })}
     </div>
@@ -434,7 +621,7 @@ function P1_Recipes({state,setState,onBack,onNext}){
   </div>;
 }
 
-function P1_Menu({state,setState,onBack}){
+function P1_Menu({state,setState,onBack,onNext}){
   const {products,inventory,sizes,useSizes,industry,businessName}=state;
   const bench=INDUSTRIES[industry];
   const activeSizes=useSizes?sizes.filter(s=>s.on&&s.name.trim()):[];
@@ -505,6 +692,187 @@ function P1_Menu({state,setState,onBack}){
       <div style={{display:"flex",gap:8}}><input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&send()} placeholder="Ask about margins, pricing, or how to improve…" style={{...iS,flex:1}}/><Btn onClick={()=>send()} disabled={loading||!chatInput.trim()}>Ask</Btn></div>
     </Card>
     <div style={{marginTop:16}}><Btn ghost onClick={onBack}>← Back to Recipes</Btn></div>
+  </div>;
+}
+
+// ── P1 Module 6: Inventory Tracker ───────────────────────────────────────────
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function P1_InventoryTracker({state,setState,onBack}){
+  const {inventory}=state;
+  const [activeMonth,setActiveMonth]=useState(new Date().getMonth());
+  const [view,setView]=useState("count"); // "count" | "order"
+  const namedInv=inventory.filter(i=>i.name.trim());
+
+  function updCount(itemId,month,field,val){
+    setState(p=>({...p,inventory:p.inventory.map(i=>{
+      if(i.id!==itemId) return i;
+      const key=field==="onHand"?"monthlyCountOnHand":"monthlyQtyOrdered";
+      return {...i,[key]:{...i[key],[month]:val}};
+    })}));
+  }
+
+  // Par = avg monthly usage * 1.2 buffer
+  function calcPar(item){
+    const usages=MONTHS.map((_,m)=>{
+      const ordered=toNum(item.monthlyQtyOrdered?.[m]||0);
+      const onHand=toNum(item.monthlyCountOnHand?.[m]||0);
+      const prevOnHand=m>0?toNum(item.monthlyCountOnHand?.[m-1]||0):0;
+      return ordered+prevOnHand-onHand;
+    }).filter(u=>u>0);
+    if(!usages.length) return null;
+    const avg=usages.reduce((s,u)=>s+u,0)/usages.length;
+    return avg*1.2;
+  }
+
+  function calcUsed(item,month){
+    const ordered=toNum(item.monthlyQtyOrdered?.[month]||0);
+    const onHand=toNum(item.monthlyCountOnHand?.[month]||0);
+    const prevOnHand=month>0?toNum(item.monthlyCountOnHand?.[month-1]||0):0;
+    return ordered+prevOnHand-onHand;
+  }
+
+  function calcOrderNeeded(item){
+    const onHand=toNum(item.monthlyCountOnHand?.[activeMonth]||0);
+    const par=calcPar(item);
+    if(par===null) return null;
+    return Math.max(0,par-onHand);
+  }
+
+  // Group by vendor for order sheet
+  const byVendor={};
+  namedInv.forEach(item=>{
+    const v=item.vendorName?.trim()||"No Vendor";
+    if(!byVendor[v]) byVendor[v]={url:item.vendorUrl||"",items:[]};
+    byVendor[v].items.push(item);
+  });
+
+  return <div className="fu">
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:16}}>
+      <div>
+        <h2 style={{fontSize:22,fontWeight:700,letterSpacing:"-.02em",marginBottom:4}}>Inventory Tracker & Order Sheet</h2>
+        <p style={{fontSize:13,color:"var(--ink2)"}}>Count what you have on hand each month, track what you use, and generate a par-based order sheet grouped by vendor.</p>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>setView("count")} style={{padding:"7px 16px",borderRadius:"var(--r)",fontSize:13,fontWeight:600,border:"1px solid",borderColor:view==="count"?"var(--ink)":"var(--line2)",background:view==="count"?"var(--ink)":"#fff",color:view==="count"?"#fff":"var(--ink2)",cursor:"pointer",fontFamily:"inherit"}}>Monthly Count</button>
+        <button onClick={()=>setView("order")} style={{padding:"7px 16px",borderRadius:"var(--r)",fontSize:13,fontWeight:600,border:"1px solid",borderColor:view==="order"?"var(--gold)":"var(--line2)",background:view==="order"?"var(--gold-bg)":"#fff",color:view==="order"?"var(--gold)":"var(--ink2)",cursor:"pointer",fontFamily:"inherit"}}>Order Sheet</button>
+      </div>
+    </div>
+
+    {/* Month selector */}
+    <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:16}}>
+      {MONTHS.map((m,i)=><button key={i} onClick={()=>setActiveMonth(i)} style={{padding:"5px 10px",borderRadius:99,fontSize:12,fontWeight:500,cursor:"pointer",border:"1px solid",borderColor:activeMonth===i?"var(--gold)":"var(--line2)",background:activeMonth===i?"var(--gold-bg)":"#fff",color:activeMonth===i?"var(--gold)":"var(--ink2)",fontFamily:"inherit"}}>{m}</button>)}
+    </div>
+
+    {view==="count"&&<>
+      <InfoBox color="blue">Enter how much you have <strong>on hand</strong> at the end of the month, and how much you <strong>ordered</strong> that month. The system calculates usage and suggests a par level.</InfoBox>
+      <Card style={{padding:0,overflow:"hidden",marginBottom:14}}>
+        <table>
+          <thead><tr style={{background:"var(--bg2)",borderBottom:"1px solid var(--line)"}}>
+            {["Item","Vendor","Unit","Ordered This Month","On Hand (count)","Used","Par Level","Status"].map(h=><th key={h} style={{fontSize:10,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.04em",whiteSpace:"nowrap",padding:"10px 12px"}}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {namedInv.map((item,i)=>{
+              const used=calcUsed(item,activeMonth);
+              const par=calcPar(item);
+              const onHand=toNum(item.monthlyCountOnHand?.[activeMonth]||"");
+              const ordered=toNum(item.monthlyQtyOrdered?.[activeMonth]||"");
+              const low=par!==null&&onHand>0&&onHand<par*0.5;
+              const ok=par!==null&&onHand>=par*0.5;
+              return <tr key={item.id} style={{borderBottom:"1px solid var(--line)",background:i%2===0?"#fff":"var(--bg2)"}}>
+                <td style={{padding:"8px 12px",fontWeight:500,fontSize:13}}>{item.name}</td>
+                <td style={{padding:"8px 12px",fontSize:12,color:"var(--ink3)"}}>{item.vendorName||"—"}</td>
+                <td style={{padding:"8px 12px",fontSize:12,color:"var(--ink3)"}}>{item.buyUnit||"—"}</td>
+                <td style={{padding:"6px 12px"}}>
+                  <input type="number" min="0" step="0.01" placeholder="0" value={item.monthlyQtyOrdered?.[activeMonth]||""}
+                    onChange={e=>updCount(item.id,activeMonth,"ordered",e.target.value)}
+                    style={{...iS,width:80,fontSize:13}}/>
+                </td>
+                <td style={{padding:"6px 12px"}}>
+                  <input type="number" min="0" step="0.01" placeholder="0" value={item.monthlyCountOnHand?.[activeMonth]||""}
+                    onChange={e=>updCount(item.id,activeMonth,"onHand",e.target.value)}
+                    style={{...iS,width:80,fontSize:13,borderColor:low?"var(--red)":undefined}}/>
+                </td>
+                <td style={{padding:"8px 12px",fontSize:13,fontFamily:"monospace"}}>{used>0?`${used.toFixed(2)} ${item.buyUnit||""}`:"—"}</td>
+                <td style={{padding:"8px 12px",fontSize:13,fontFamily:"monospace",color:"var(--ink2)"}}>{par!==null?`${par.toFixed(2)} ${item.buyUnit||""}`:"Need more data"}</td>
+                <td style={{padding:"8px 12px"}}>
+                  {par===null?<span style={{fontSize:11,color:"var(--ink3)"}}>—</span>
+                  :low?<span style={{background:"var(--red-bg)",color:"var(--red)",border:"1px solid var(--red-line)",borderRadius:99,padding:"2px 8px",fontSize:11,fontWeight:600}}>⚠ Low</span>
+                  :ok?<span style={{background:"var(--green-bg)",color:"var(--green)",border:"1px solid var(--green-line)",borderRadius:99,padding:"2px 8px",fontSize:11,fontWeight:600}}>✓ Good</span>
+                  :<span style={{fontSize:11,color:"var(--ink3)"}}>—</span>}
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+        {namedInv.length===0&&<div style={{textAlign:"center",padding:"28px",color:"var(--ink3)",fontSize:14}}>No inventory items yet — add them in the Inventory step.</div>}
+      </Card>
+
+      {/* Monthly usage trend */}
+      {namedInv.some(i=>Object.keys(i.monthlyCountOnHand||{}).length>0)&&<Card>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Usage by Month</div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{minWidth:700}}>
+            <thead><tr style={{background:"var(--bg2)",borderBottom:"1px solid var(--line)"}}>
+              <th style={{padding:"8px 12px",fontSize:11,fontWeight:600,color:"var(--ink3)",textAlign:"left"}}>Item</th>
+              {MONTHS.map(m=><th key={m} style={{padding:"8px 8px",fontSize:11,fontWeight:600,color:"var(--ink3)",textAlign:"center"}}>{m}</th>)}
+            </tr></thead>
+            <tbody>
+              {namedInv.map((item,i)=><tr key={item.id} style={{borderBottom:"1px solid var(--line)",background:i%2===0?"#fff":"var(--bg2)"}}>
+                <td style={{padding:"8px 12px",fontSize:13,fontWeight:500}}>{item.name}</td>
+                {MONTHS.map((_,m)=>{const u=calcUsed(item,m);return <td key={m} style={{padding:"8px 8px",fontSize:12,fontFamily:"monospace",textAlign:"center",color:u>0?"var(--ink)":"var(--ink3)"}}>{u>0?u.toFixed(1):"—"}</td>;})}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      </Card>}
+    </>}
+
+    {view==="order"&&<>
+      <InfoBox color="gold">This order sheet is grouped by vendor. Items below par are flagged. Click the vendor link to go directly to their ordering page.</InfoBox>
+      {Object.entries(byVendor).map(([vendorName,vendorData])=>{
+        const orderItems=vendorData.items.map(item=>{
+          const needed=calcOrderNeeded(item);
+          const onHand=toNum(item.monthlyCountOnHand?.[activeMonth]||0);
+          const par=calcPar(item);
+          return {...item,needed,onHand,par};
+        });
+        const hasOrders=orderItems.some(i=>i.needed!==null&&i.needed>0);
+        return <Card key={vendorName} style={{marginBottom:12,borderColor:hasOrders?"var(--gold-line)":undefined}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div>
+              <div style={{fontSize:15,fontWeight:700}}>{vendorName}</div>
+              {vendorData.url&&<a href={vendorData.url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:"var(--blue)"}}>🔗 Open ordering page →</a>}
+            </div>
+            {hasOrders&&<span style={{background:"var(--gold-bg)",color:"var(--gold)",border:"1px solid var(--gold-line)",borderRadius:99,padding:"3px 10px",fontSize:12,fontWeight:600}}>Order needed</span>}
+          </div>
+          <table>
+            <thead><tr style={{background:"var(--bg2)",borderBottom:"1px solid var(--line)"}}>
+              {["Item","On Hand","Par Level","Order Qty","Unit","Est. Cost"].map(h=><th key={h} style={{padding:"8px 12px",fontSize:10,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.04em"}}>{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {orderItems.map((item,i)=>{
+                const estCost=item.needed!==null&&toNum(item.buyPrice)>0&&toNum(item.buyQty)>0?item.needed*(toNum(item.buyPrice)/toNum(item.buyQty)):null;
+                return <tr key={item.id} style={{borderBottom:"1px solid var(--line)",background:item.needed>0?"var(--gold-bg)":i%2===0?"#fff":"var(--bg2)"}}>
+                  <td style={{padding:"8px 12px",fontWeight:500,fontSize:13}}>{item.name}</td>
+                  <td style={{padding:"8px 12px",fontSize:13,fontFamily:"monospace"}}>{item.onHand>0?`${item.onHand} ${item.buyUnit||""}`:"—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:13,fontFamily:"monospace"}}>{item.par!==null?`${item.par.toFixed(1)} ${item.buyUnit||""}`:"—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:14,fontWeight:700,color:item.needed>0?"var(--gold)":"var(--green)"}}>{item.needed!==null?item.needed>0?`${item.needed.toFixed(1)} ${item.buyUnit||""}`:"✓ Stocked":"—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:13,color:"var(--ink3)"}}>{item.buyUnit||"—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:13,fontFamily:"monospace",color:"var(--ink2)"}}>{estCost!==null&&estCost>0?fmt$(estCost):"—"}</td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+          {hasOrders&&<div style={{marginTop:10,padding:"8px 12px",background:"var(--gold-bg)",borderRadius:"var(--r)",fontSize:13,color:"var(--gold)",fontWeight:600}}>
+            Est. total order from {vendorName}: {fmt$(orderItems.reduce((s,i)=>{if(!i.needed||i.needed<=0)return s;const c=toNum(i.buyPrice)>0&&toNum(i.buyQty)>0?i.needed*(toNum(i.buyPrice)/toNum(i.buyQty)):0;return s+c;},0))}
+          </div>}
+        </Card>;
+      })}
+      {Object.keys(byVendor).length===0&&<InfoBox color="gold">Add inventory items with vendor names to generate your order sheet.</InfoBox>}
+    </>}
+
+    <div style={{marginTop:16}}><Btn ghost onClick={onBack}>← Back to Menu & Margins</Btn></div>
   </div>;
 }
 
@@ -1042,6 +1410,114 @@ function TrueMarginDashboard({state}){
   </div>;
 }
 
+// ── Price Alert Center ───────────────────────────────────────────────────────
+function PriceAlertCenter({state, onClose}){
+  const {inventory, products, sizes, useSizes, businessName} = state;
+  const activeSizes = useSizes ? sizes.filter(s=>s.on&&s.name.trim()) : [];
+
+  // Collect all items with price changes
+  const changedItems = inventory.filter(i=>i.priceHistory?.length>0&&i.name.trim());
+
+  // For each changed item, find which products use it and recalculate margin impact
+  function getAffectedProducts(invItem){
+    const affected = [];
+    products.filter(p=>p.name.trim()).forEach(prod=>{
+      const szList = activeSizes.length>0 ? activeSizes : [{id:"__flat__",name:"",oz:""}];
+      szList.forEach(sz=>{
+        const key = sz.id==="__flat__"?"__flat__":`sz_${sz.id}`;
+        const ings = prod[key]||[];
+        const uses = ings.some(i=>i.inventoryId===invItem.id);
+        if(!uses) return;
+        // Calc old COGS (with old price) and new COGS (with current price)
+        const lastChange = invItem.priceHistory[invItem.priceHistory.length-1];
+        const oldPrice = toNum(lastChange.from);
+        const newPrice = toNum(invItem.buyPrice);
+        const oldCost = convertCost(invItem.buyQty,invItem.buyUnit,oldPrice,
+          ings.find(i=>i.inventoryId===invItem.id)?.useQty||0,
+          ings.find(i=>i.inventoryId===invItem.id)?.useUnit||invItem.buyUnit);
+        const newCost = convertCost(invItem.buyQty,invItem.buyUnit,newPrice,
+          ings.find(i=>i.inventoryId===invItem.id)?.useQty||0,
+          ings.find(i=>i.inventoryId===invItem.id)?.useUnit||invItem.buyUnit);
+        if(oldCost===null||newCost===null) return;
+        const cogsDiff = newCost - oldCost;
+        const sell = sz.id==="__flat__"?toNum(prod.sellPrice):toNum(prod[`sell_${sz.id}`]||prod.sellPrice);
+        const oldMargin = sell>0?((sell-(newCost-cogsDiff+ ings.filter(i=>i.inventoryId!==invItem.id).reduce((s,i)=>{const inv2=inventory.find(x=>x.id===i.inventoryId);const c=inv2?convertCost(inv2.buyQty,inv2.buyUnit,inv2.buyPrice,i.useQty,i.useUnit):null;return s+(c||0);},0)))/sell)*100:null;
+        // Simplified: just show the ingredient cost delta and impact on margin
+        const totalNewCOGS = ings.reduce((s,i)=>{const inv2=inventory.find(x=>x.id===i.inventoryId);const c=inv2?convertCost(inv2.buyQty,inv2.buyUnit,inv2.buyPrice,i.useQty,i.useUnit):null;return s+(c||0);},0);
+        const totalOldCOGS = totalNewCOGS - cogsDiff;
+        const newMargin = sell>0?((sell-totalNewCOGS)/sell)*100:null;
+        const oldMarginSimple = sell>0?((sell-totalOldCOGS)/sell)*100:null;
+        const label = sz.id!=="__flat__"?`${prod.name} · ${sz.name}${sz.oz?` (${sz.oz}oz)`:""}`:prod.name;
+        affected.push({label,cogsDiff,oldMargin:oldMarginSimple,newMargin,sell});
+      });
+    });
+    return affected;
+  }
+
+  if(changedItems.length===0) return <div style={{padding:"28px",textAlign:"center",color:"var(--ink3)",fontSize:14}}>No price changes recorded yet. Update an ingredient price in your inventory to see margin impacts here.</div>;
+
+  return <div style={{maxHeight:"80vh",overflowY:"auto"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10}}>
+      <div>
+        <div style={{fontSize:16,fontWeight:700,marginBottom:2}}>Price Change Alerts</div>
+        <div style={{fontSize:12,color:"var(--ink3)"}}>{changedItems.length} item{changedItems.length!==1?"s":""} with recent price changes</div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={onClose} style={{padding:"7px 14px",borderRadius:"var(--r)",border:"1px solid var(--line2)",background:"var(--bg2)",color:"var(--ink2)",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Close</button>
+      </div>
+    </div>
+
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {changedItems.map(item=>{
+        const last=item.priceHistory[item.priceHistory.length-1];
+        const pct=((toNum(last.to)-toNum(last.from))/toNum(last.from))*100;
+        const affected=getAffectedProducts(item);
+        const isUp=pct>0;
+        return <Card key={item.id} style={{borderColor:isUp?"var(--red-line)":"var(--green-line)",background:isUp?"#fff":"#fff"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
+            <div>
+              <div style={{fontSize:14,fontWeight:700}}>{item.name}</div>
+              {item.vendorName&&<div style={{fontSize:12,color:"var(--ink3)",marginTop:1}}>
+                {item.vendorUrl?<a href={item.vendorUrl} target="_blank" rel="noopener noreferrer" style={{color:"var(--blue)"}}>{item.vendorName} →</a>:item.vendorName}
+              </div>}
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:18,fontWeight:700,color:isUp?"var(--red)":"var(--green)"}}>{isUp?"▲":"▼"} {Math.abs(pct).toFixed(1)}%</div>
+              <div style={{fontSize:13,color:"var(--ink2)"}}>${last.from} → ${last.to} per {item.buyUnit}</div>
+              <div style={{fontSize:11,color:"var(--ink3)"}}>Last updated {last.date}</div>
+            </div>
+          </div>
+
+          {/* Full price history */}
+          {item.priceHistory.length>1&&<div style={{marginBottom:10}}>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:5}}>Price History</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {item.priceHistory.map((h,i)=>{const p=((toNum(h.to)-toNum(h.from))/toNum(h.from))*100;return <span key={i} style={{fontSize:11,background:"var(--bg2)",border:"1px solid var(--line)",borderRadius:"var(--r)",padding:"3px 8px",color:p>0?"var(--red)":"var(--green)"}}>{h.date}: ${h.from}→${h.to} ({p>0?"+":""}{p.toFixed(1)}%)</span>;})}
+            </div>
+          </div>}
+
+          {/* Affected products */}
+          {affected.length>0&&<div>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}}>Margin Impact on {affected.length} Product{affected.length!==1?"s":""}</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {affected.map((a,i)=>{
+                const marginDiff=a.newMargin!==null&&a.oldMargin!==null?a.newMargin-a.oldMargin:null;
+                return <div key={i} style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:12,alignItems:"center",background:"var(--bg2)",borderRadius:"var(--r)",padding:"8px 12px"}}>
+                  <span style={{fontSize:13,fontWeight:500}}>{a.label}</span>
+                  <span style={{fontSize:12,color:"var(--ink3)",fontFamily:"monospace"}}>{a.oldMargin!==null?fmtPct(a.oldMargin):"—"} → {a.newMargin!==null?fmtPct(a.newMargin):"—"}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:marginDiff!==null&&marginDiff<0?"var(--red)":"var(--green)"}}>{marginDiff!==null?`${marginDiff>0?"+":""}${marginDiff.toFixed(1)}% margin`:""}</span>
+                  <span style={{fontSize:12,color:a.cogsDiff>0?"var(--red)":"var(--green)",fontFamily:"monospace"}}>{a.cogsDiff>0?"+":""}{fmt$(a.cogsDiff)}/unit COGS</span>
+                </div>;
+              })}
+            </div>
+          </div>}
+          {affected.length===0&&<div style={{fontSize:12,color:"var(--ink3)"}}>No recipes use this item yet.</div>}
+        </Card>;
+      })}
+    </div>
+  </div>;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // ROOT APP
 // ════════════════════════════════════════════════════════════════════════════
@@ -1051,19 +1527,124 @@ export default function App(){
   const [p2step,setP2step]=useState(0);
   const importRef=useRef(null);
   const [importMsg,setImportMsg]=useState("");
+  const [showAlerts,setShowAlerts]=useState(false);
   useEffect(()=>{save({...state,lastSaved:Date.now()});},[state]);
   const set=(f,v)=>setState(p=>({...p,[f]:v}));
   const go=(n)=>setState(p=>({...p,step:n}));
 
-  function exportData(){
-    const filename=`${(state.businessName||"my-business").toLowerCase().replace(/\s+/g,"-")}-health-check.json`;
-    const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
-    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);
+  async function exportData(){
+    // Dynamically load SheetJS
+    const XLSX = await import("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js").then(()=>window.XLSX);
+    const wb = XLSX.utils.book_new();
+    const bizName = state.businessName||"My Business";
+    const filename = `${bizName.toLowerCase().replace(/\s+/g,"-")}-health-check.xlsx`;
+
+    // ── Sheet 1: Business Info ──
+    const infoRows = [
+      ["Business Name", bizName],
+      ["Industry",      state.industry||""],
+      ["Export Date",   new Date().toLocaleDateString()],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(infoRows), "Business Info");
+
+    // ── Sheet 2: Inventory ──
+    const invHeaders = ["Item Name","Vendor","Order Link","Unit","Price Paid","Cost/Unit","Category"];
+    const invRows = state.inventory.filter(i=>i.name.trim()).map(i=>{
+      const cpu = toNum(i.buyQty)>0&&toNum(i.buyPrice)>0 ? toNum(i.buyPrice)/toNum(i.buyQty) : "";
+      return [i.name, i.vendorName||"", i.vendorUrl||"", i.buyUnit||"", toNum(i.buyPrice)||"", cpu?parseFloat(cpu.toFixed(4)):"", i.category||""];
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([invHeaders,...invRows]), "Inventory");
+
+    // ── Sheet 3: Menu & Margins ──
+    const activeSizes = state.useSizes ? state.sizes.filter(s=>s.on&&s.name.trim()) : [];
+    function getCOGS(prod,szId){const key=szId==="__flat__"?"__flat__":`sz_${szId}`;const ings=prod[key]||[];return ings.reduce((s,ing)=>{const inv=state.inventory.find(i=>i.id===ing.inventoryId);const c=inv?convertCost(inv.buyQty,inv.buyUnit,inv.buyPrice,ing.useQty,ing.useUnit):null;return s+(c||0);},0);}
+    function getSell(prod,szId){return szId==="__flat__"?toNum(prod.sellPrice):toNum(prod[`sell_${szId}`]||prod.sellPrice);}
+    const menuHeaders = ["Product","Size","Sell Price","COGS","Gross Profit","Gross Margin %","vs Benchmark"];
+    const bench = INDUSTRIES[state.industry];
+    const menuRows = [];
+    state.products.filter(p=>p.name.trim()).forEach(prod=>{
+      const szList = activeSizes.length>0 ? activeSizes : [{id:"__flat__",name:"",oz:""}];
+      szList.forEach(sz=>{
+        const cogs=getCOGS(prod,sz.id), sell=getSell(prod,sz.id);
+        const margin=sell>0?((sell-cogs)/sell)*100:null;
+        const vs=margin!==null&&bench?parseFloat((margin-bench.avg).toFixed(1)):"";
+        menuRows.push([prod.name, sz.name||"—", sell||"", parseFloat(cogs.toFixed(4))||"", sell&&cogs?parseFloat((sell-cogs).toFixed(4)):"", margin!==null?parseFloat(margin.toFixed(1)):"", vs]);
+      });
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([menuHeaders,...menuRows]), "Menu & Margins");
+
+    // ── Sheet 4: Employees ──
+    const empHeaders = ["Name","Title","Wage Type","Rate","Hourly Equivalent","Labor Type"];
+    const empRows = state.employees.filter(e=>e.name.trim()).map(e=>{
+      const hourlyEq = e.wageType==="salary" ? parseFloat((toNum(e.wage)/52/40).toFixed(2)) : toNum(e.wage);
+      return [e.name, e.title||"", e.wageType, toNum(e.wage)||"", hourlyEq||"", e.laborType];
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([empHeaders,...empRows]), "Employees");
+
+    // ── Sheet 5: True Margin Summary ──
+    function laborCost(prodId,szId){
+      const taskList=state[`labor_${prodId}_${szId}`]||[];
+      return taskList.reduce((sum,t)=>{
+        const emp=state.employees.find(e=>e.id===t.positionId);
+        if(!emp) return sum;
+        const rate=emp.wageType==="hourly"?toNum(emp.wage):toNum(emp.wage)/52/40;
+        const secs=(t.timeUnit==="minutes"?toNum(t.timeValue)*60:t.timeUnit==="hours"?toNum(t.timeValue)*3600:toNum(t.timeValue));
+        return sum+rate*(secs/3600);
+      },0);
+    }
+    const tmHeaders = ["Product","Size","Sell Price","COGS","Labor Cost","Gross Margin %","Labor %","Contribution $","Contribution %","Signal"];
+    const tmRows = [];
+    state.products.filter(p=>p.name.trim()).forEach(prod=>{
+      const szList = activeSizes.length>0 ? activeSizes : [{id:"__flat__",name:"",oz:""}];
+      szList.forEach(sz=>{
+        const cogs=getCOGS(prod,sz.id), sell=getSell(prod,sz.id);
+        const labor=laborCost(prod.id,sz.id);
+        const grossMargin=sell>0?((sell-cogs)/sell)*100:null;
+        const laborPct=sell>0?(labor/sell)*100:null;
+        const contribution=sell>0?sell-cogs-labor:null;
+        const contribPct=sell>0&&contribution!==null?(contribution/sell)*100:null;
+        const signal=contribution!==null&&contribution<0?"Losing money":grossMargin!==null&&bench&&grossMargin>=bench.high&&laborPct!==null&&laborPct<=bench.laborAvg?"Push this":"Review";
+        tmRows.push([
+          prod.name, sz.name||"—", sell||"",
+          parseFloat(cogs.toFixed(4))||"",
+          parseFloat(labor.toFixed(4))||"",
+          grossMargin!==null?parseFloat(grossMargin.toFixed(1)):"",
+          laborPct!==null?parseFloat(laborPct.toFixed(1)):"",
+          contribution!==null?parseFloat(contribution.toFixed(4)):"",
+          contribPct!==null?parseFloat(contribPct.toFixed(1)):"",
+          signal
+        ]);
+      });
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([tmHeaders,...tmRows]), "True Margin");
+
+    // ── Sheet 6: Monthly Inventory ──
+    const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const miHeaders=["Item","Vendor","Unit",...MONTHS.flatMap(m=>[`${m} Ordered`,`${m} On Hand`,`${m} Used`]),"Par Level"];
+    const miRows=state.inventory.filter(i=>i.name.trim()).map(item=>{
+      const monthCols=MONTHS.flatMap((_,m)=>{
+        const ordered=toNum(item.monthlyQtyOrdered?.[m]||0);
+        const onHand=toNum(item.monthlyCountOnHand?.[m]||0);
+        const prevOnHand=m>0?toNum(item.monthlyCountOnHand?.[m-1]||0):0;
+        const used=ordered+prevOnHand-onHand;
+        return [ordered||"",onHand||"",used>0?parseFloat(used.toFixed(2)):""];
+      });
+      // Par = avg usage * 1.2
+      const usages=MONTHS.map((_,m)=>{const o=toNum(item.monthlyQtyOrdered?.[m]||0),h=toNum(item.monthlyCountOnHand?.[m]||0),ph=m>0?toNum(item.monthlyCountOnHand?.[m-1]||0):0;return o+ph-h;}).filter(u=>u>0);
+      const par=usages.length?parseFloat((usages.reduce((s,u)=>s+u,0)/usages.length*1.2).toFixed(2)):"";
+      return [item.name,item.vendorName||"",item.buyUnit||"",...monthCols,par];
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([miHeaders,...miRows]), "Monthly Inventory");
+
+    XLSX.writeFile(wb, filename);
+    setImportMsg("✓ Downloaded as Excel");
+    setTimeout(()=>setImportMsg(""),3000);
   }
+
   function importData(e){
     const file=e.target.files[0];if(!file)return;
     const reader=new FileReader();
-    reader.onload=(ev)=>{try{const parsed=JSON.parse(ev.target.result);if(!parsed.businessName&&!parsed.inventory)throw new Error("Invalid");setState({...DEFAULT,...parsed});setImportMsg("✓ Data loaded");setTimeout(()=>setImportMsg(""),3000);}catch{setImportMsg("⚠ Invalid file");setTimeout(()=>setImportMsg(""),4000);}};
+    reader.onload=(ev)=>{try{const parsed=JSON.parse(ev.target.result);if(!parsed.businessName&&!parsed.inventory)throw new Error("Invalid");setState({...DEFAULT,...parsed});setImportMsg("✓ Data loaded");setTimeout(()=>setImportMsg(""),3000);}catch{setImportMsg("⚠ Use the .json export file to restore your data");setTimeout(()=>setImportMsg(""),4000);}};
     reader.readAsText(file);e.target.value="";
   }
 
@@ -1082,7 +1663,10 @@ export default function App(){
         {state.lastSaved&&<span style={{fontSize:11,color:"var(--ink3)"}}>Saved {new Date(state.lastSaved).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
         <input ref={importRef} type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
         <button onClick={()=>importRef.current.click()} style={{padding:"6px 12px",borderRadius:"var(--r)",border:"1px solid var(--line2)",background:"var(--bg2)",color:"var(--ink2)",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>↑ Import</button>
-        <button onClick={exportData} style={{padding:"6px 12px",borderRadius:"var(--r)",border:"1px solid var(--gold-line)",background:"var(--gold-bg)",color:"var(--gold)",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>↓ Export</button>
+        <button onClick={exportData} style={{padding:"6px 12px",borderRadius:"var(--r)",border:"1px solid var(--gold-line)",background:"var(--gold-bg)",color:"var(--gold)",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>↓ Export .xlsx</button>
+        {(()=>{const alertCount=state.inventory.filter(i=>i.priceHistory?.length>0&&i.name.trim()).length;return alertCount>0&&<button onClick={()=>setShowAlerts(true)} style={{position:"relative",padding:"6px 14px",borderRadius:"var(--r)",border:"1px solid var(--red-line)",background:"var(--red-bg)",color:"var(--red)",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>
+          🔔 {alertCount} Price Alert{alertCount!==1?"s":""}
+        </button>;})()}
       </div>
     </div>
 
@@ -1099,7 +1683,8 @@ export default function App(){
         {state.step===1&&<P1_Sizes state={state} setState={setState} onBack={()=>go(0)} onNext={()=>go(2)}/>}
         {state.step===2&&<P1_Inventory state={state} setState={setState} onBack={()=>go(skipSizes?0:1)} onNext={()=>go(3)}/>}
         {state.step===3&&<P1_Recipes state={state} setState={setState} onBack={()=>go(2)} onNext={()=>go(4)}/>}
-        {state.step===4&&<P1_Menu state={state} setState={setState} onBack={()=>go(3)}/>}
+        {state.step===4&&<P1_Menu state={state} setState={setState} onBack={()=>go(3)} onNext={()=>go(5)}/>}
+        {state.step===5&&<P1_InventoryTracker state={state} setState={setState} onBack={()=>go(4)}/>}
       </>}
 
       {/* ── PHASE 2 ── */}
@@ -1115,5 +1700,12 @@ export default function App(){
       {/* ── TRUE MARGIN ── */}
       {phase===3&&<TrueMarginDashboard state={state}/>}
     </div>
+
+    {/* Price alert modal */}
+    {showAlerts&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setShowAlerts(false)}>
+      <div style={{background:"#fff",borderRadius:"var(--rL)",padding:"24px",maxWidth:700,width:"100%",maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.3)"}} onClick={e=>e.stopPropagation()}>
+        <PriceAlertCenter state={state} onClose={()=>setShowAlerts(false)}/>
+      </div>
+    </div>}
   </div>;
 }
