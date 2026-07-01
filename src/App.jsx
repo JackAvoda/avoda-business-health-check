@@ -386,13 +386,13 @@ function P1_Inventory({state,setState,onBack,onNext}){
     <div style={{background:"var(--blue-bg)",border:"1px solid var(--blue-line)",borderRadius:"var(--rL)",padding:"14px 18px",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
       <div>
         <div style={{fontSize:13,fontWeight:700,color:"var(--blue)",marginBottom:2}}>📂 Import from spreadsheet</div>
-        <div style={{fontSize:12,color:"var(--ink2)"}}>Upload a CSV file with your vendor, item name, and price already filled in. Excel users: <strong>File → Save As → CSV</strong> first.</div>
+        <div style={{fontSize:12,color:"var(--ink2)"}}>Upload a CSV with 6 columns: <strong>Item Name, Price, Order Quantity, SKU, Link, Vendor Name</strong>. Download the template to get started. Excel users: <strong>File → Save As → CSV</strong> first. Google Sheets: <strong>File → Download → CSV</strong>.</div>
       </div>
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
         {importMsg&&<span style={{fontSize:12,color:importMsg.startsWith("✓")?"var(--green)":"var(--red)",fontWeight:600}}>{importMsg}</span>}
         <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" onChange={handleFile} style={{display:"none"}}/>
         <button onClick={()=>{
-          const csv="Item Name,Vendor Name,Order Link,Unit,Price\nWhole Milk,Kroger,https://kroger.com,gallon,3.29\nVanilla Syrup,Sysco,,gallon,12.99\n12oz Cup,Amazon,https://amazon.com,each,0.05";
+          const csv="Item Name,Price,Order quantity,sku,Link,Vendor Name\nWhole Milk,$ 2.99,1,gallon,https://kroger.com,Kroger\nVanilla Syrup,$ 40.00,1,gal,,Sysco\n12oz hot cups,$ 46.99,1000,Case,,Webstaurant\nOat milk,$ 40.99,12 (32oz),case,https://amazon.com,Amazon";
           const blob=new Blob([csv],{type:"text/csv"});
           const url=URL.createObjectURL(blob);
           const a=document.createElement("a");a.href=url;a.download="inventory-template.csv";a.click();URL.revokeObjectURL(url);
@@ -418,11 +418,11 @@ function P1_Inventory({state,setState,onBack,onNext}){
       {/* Mapping selectors */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10,marginBottom:16}}>
         {[
-          {key:"name",      label:"Item Name",    required:true},
-          {key:"vendorName",label:"Vendor Name",   required:false},
-          {key:"vendorUrl", label:"Order Link/URL",required:false},
-          {key:"buyUnit",   label:"Unit",          required:false},
-          {key:"buyPrice",  label:"Price",         required:false},
+          {key:"name",      label:"A — Item Name",        required:true},
+          {key:"buyPrice",  label:"B — Price",             required:false},
+          {key:"buyUnit",   label:"D — SKU / Unit",        required:false},
+          {key:"vendorUrl", label:"E — Link",              required:false},
+          {key:"vendorName",label:"F — Vendor Name",       required:false},
         ].map(f=><div key={f.key}>
           <div style={{fontSize:11,fontWeight:600,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>{f.label}{f.required&&<span style={{color:"var(--red)"}}> *</span>}</div>
           <select value={importState.mapping[f.key]||""} onChange={e=>setImportState(p=>({...p,mapping:{...p.mapping,[f.key]:e.target.value}}))} style={{...selS,borderColor:f.required&&!importState.mapping[f.key]?"var(--red)":undefined}}>
