@@ -323,6 +323,7 @@ function P1_Inventory({state,setState,onBack,onNext}){
         const fields=[
           {key:"name",      keywords:["item name","item","name","product","ingredient","material","description"]},
           {key:"buyPrice",  keywords:["price","cost","rate","amount","$"]},
+          {key:"buyQty",    keywords:["order quantity","quantity","qty","count","total qty","amount","number","how many"]},
           {key:"buyUnit",   keywords:["sku","unit","uom","measure"]},
           {key:"vendorUrl", keywords:["link","url","website","href","order link","site"]},
           {key:"vendorName",keywords:["vendor name","vendor","supplier","source","company","store","distributor"]},
@@ -361,7 +362,16 @@ function P1_Inventory({state,setState,onBack,onNext}){
         const raw=(row[bp]||"").replace(/[$,]/g,"").trim();
         item.buyPrice=raw;
       }
-      item.buyQty="1"; // default to 1 unit since we're not importing qty
+      // Pull quantity from file if available, otherwise default to 1
+      const bq=getCol("buyQty");
+      if(bq!==null&&row[bq]){
+        // Extract leading number from values like "1000", "12 (32oz)", "case of 6"
+        const rawQty=(row[bq]||"").trim();
+        const numMatch=rawQty.match(/^[\d,]+/);
+        item.buyQty=numMatch?numMatch[0].replace(/,/g,""):"1";
+      } else {
+        item.buyQty="1";
+      }
       return item;
     }).filter(i=>i.name.trim()&&i.name.trim()!=="Item Name");
 
@@ -420,6 +430,7 @@ function P1_Inventory({state,setState,onBack,onNext}){
         {[
           {key:"name",      label:"A — Item Name",        required:true},
           {key:"buyPrice",  label:"B — Price",             required:false},
+          {key:"buyQty",    label:"C — Order Quantity",    required:false},
           {key:"buyUnit",   label:"D — SKU / Unit",        required:false},
           {key:"vendorUrl", label:"E — Link",              required:false},
           {key:"vendorName",label:"F — Vendor Name",       required:false},
