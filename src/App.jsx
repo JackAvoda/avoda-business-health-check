@@ -1359,7 +1359,7 @@ function TrueMarginDashboard({state}){
 
   return <div className="fu">
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:16}}>
-      <div><h2 style={{fontSize:22,fontWeight:700,letterSpacing:"-.02em",marginBottom:2}}>True Margin Dashboard</h2><p style={{fontSize:13,color:"var(--ink2)"}}>{businessName} · Full Profitability Picture</p></div>
+      <div><h2 style={{fontSize:22,fontWeight:700,letterSpacing:"-.02em",marginBottom:2}}>True Margin Dashboard</h2><p style={{fontSize:13,color:"var(--ink2)"}}>{businessName} · Profitability Picture</p></div>
       <button onClick={copyReport} style={{padding:"8px 16px",border:"1px solid var(--line2)",borderRadius:"var(--r)",background:"var(--bg2)",color:"var(--ink2)",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>Copy Full Report</button>
     </div>
 
