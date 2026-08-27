@@ -1667,7 +1667,7 @@ export default function App(){
     <div style={{background:"#fff",borderBottom:"1px solid var(--line)",padding:"12px 24px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
       <div>
         <div style={{fontSize:10,fontWeight:700,color:"var(--ink3)",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>Avoda Business Health Check</div>
-        <div style={{fontSize:16,fontWeight:700,color:"var(--ink)",letterSpacing:"-.02em"}}>{state.businessName||"Your Business"} <span style={{fontWeight:400,color:"var(--ink3)"}}>— Full Profitability System</span></div>
+        <div style={{fontSize:16,fontWeight:700,color:"var(--ink)",letterSpacing:"-.02em"}}>{state.businessName||"Your Business"} <span style={{fontWeight:400,color:"var(--ink3)"}}>— Profitability System</span></div>
       </div>
       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
         {importMsg&&<span style={{fontSize:12,color:importMsg.startsWith("✓")?"var(--green)":"var(--gold)"}}>{importMsg}</span>}
